@@ -102,6 +102,28 @@ pvesm add cifs Templates \
   --content backup \
   --smbversion 3
 
+# Restore the most recent Windows Template (VM ID 8001)
+restore_vm_8001 () {
+VMID=8001
+BACKUP_DIR="/mnt/pve/Templates/dump"
+
+echo "🔍 Searching for the newest vzdump backup of VM ${VMID} in ${BACKUP_DIR} …"
+LATEST_BACKUP=$(ls -1t ${BACKUP_DIR}/vzdump-qemu-${VMID}-*.vma.zst 2>/dev/null | head -n 1)
+
+if [[ -z "$LATEST_BACKUP" ]]; then
+  echo "❌ No vzdump backup files found for VM ${VMID} in ${BACKUP_DIR}"
+  exit 1
+fi
+
+echo "✅ Latest backup found: $LATEST_BACKUP"
+echo "↩️  Restoring to VMID ${VMID} on storage local-lvm …"
+
+qmrestore "$LATEST_BACKUP" "$VMID" --storage local-lvm --unique
+
+echo "🎉 VM ${VMID} has been restored from $LATEST_BACKUP"
+}
+restore_vm_8001
+
 # Download and run TemplateGenerator
 echo "📥 Downloading TemplateGenerator..."
 curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt -o /usr/local/bin/TemplateGenerator
