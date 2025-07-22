@@ -1,0 +1,99 @@
+#!/bin/bash
+# TemplateGenerator - Script to create multiple Proxmox templates
+# Made for local-lvm storage
+
+# Set PATH for cron job environment
+#export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Ensure required package is installed
+apt install libguestfs-tools -y
+
+# Set DEBUG_MODE to 'true' to display all command outputs, or 'false' to suppress them
+DEBUG_MODE=false
+
+# Function to run commands based on the debug mode setting
+run_cmd() {
+    if [ "$DEBUG_MODE" = true ]; then
+        "$@"
+    else
+        "$@" > /dev/null 2>&1
+    fi
+}
+
+# Function to display progress bar
+show_progress() {
+    local current_step=$1
+    local total_steps=6  # Total steps in template creation (excluding delete)
+    local progress=$(( (current_step * 100) / total_steps ))
+    echo -ne "Progress: ${progress}%\r"
+}
+
+# Function to delete a VM if it exists
+delete_existing_vm() {
+    local vmid=$1
+    local name=$2
+
+    if qm status "$vmid" &> /dev/null; then
+        echo "Deleting ${name}..."
+        run_cmd qm stop "$vmid"
+        run_cmd qm destroy "$vmid" --destroy-unreferenced-disks
+    fi
+}
+
+# Function to create a Proxmox template for a specified image and VMID
+create_template() {
+    local vmid=$1
+    local name=$2
+    local image_url=$3
+    local image_file="${name}-cloudimg.img"
+
+    # Step 0: Delete existing VM with the same VMID if it exists
+    delete_existing_vm "$vmid" "$name"
+
+    echo "Generating ${name}..."
+
+    # Step 1: Download the specified cloud image
+    run_cmd wget "${image_url}" -O "${image_file}"
+    show_progress 1
+
+    # Step 2: Install qemu-guest-agent into the image
+    run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent
+    show_progress 2
+
+    # Step 3: Create a new Proxmox VM with the specified parameters
+    run_cmd qm create "${vmid}" --memory 2048 --cpu host --core 2 --name "${name}" --net0 virtio,bridge=vmbr0
+    show_progress 3
+
+    # Step 4: Import the downloaded disk to Proxmox's local-lvm storage
+    run_cmd qm disk import "${vmid}" "${image_file}" local-lvm
+    show_progress 4
+
+    # Step 5: Configure the VM storage and settings
+    run_cmd qm set "${vmid}" --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-"${vmid}"-disk-0,discard=on,ssd=1
+    run_cmd qm disk resize "${vmid}" scsi0 8G
+    run_cmd qm set "${vmid}" --ide2 local-lvm:cloudinit
+    run_cmd qm set "${vmid}" --boot c --bootdisk scsi0
+    run_cmd qm set "${vmid}" --agent enabled=1
+    show_progress 5
+
+    # Step 6: Convert the VM into a template
+    run_cmd qm template "${vmid}"
+    show_progress 6
+
+    echo -ne "Progress: 100%\n"
+    echo "${name} template created successfully with VMID ${vmid}."
+}
+
+# Create templates for Ubuntu and Debian
+create_template 8000 "Ubuntu24.04Template" "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+create_template 7999 "Ubuntu24.10Template" "https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-amd64.img"
+create_template 7998 "Ubuntu22.04Template" "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+create_template 7997 "Debian11Template" "https://cdimage.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
+create_template 7996 "Debian12Template" "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+
+echo "All templates created successfully."
+
+# Make it executable with: chmod +x TemplateGenerator
+# Run it with: ./TemplateGenerator
+# Add the cronjob at: crontab -e
+# Add: * * */7 * * /root/TemplateGenerator
