@@ -1,13 +1,13 @@
 #!/bin/bash
 set -e
 
-# Execute with: bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/InstallScriptNewNode.sh)
-
 echo "🧭 Proxmox Setup Script with Menu"
 echo "1) Update (no-subscription repos + apt upgrade)"
-echo "2) Add Templates (mount SMB, restore template, run generator)"
+echo "2) Add Templates (mount SMB, restore Windows VM, run generator)"
 echo "3) Install NGINX (reverse proxy for web interface)"
 echo "4) All of the above"
+echo "5) Just run TemplateGenerator script"
+echo "6) Add SMB + restore Windows template only"
 echo "0) Exit"
 read -rp "➡️  Select an option: " option
 
@@ -124,12 +124,28 @@ add_templates() {
 
     restore_vm_8001
 
+    run_template_generator
+}
+
+run_template_generator() {
     echo "📥 Downloading TemplateGenerator..."
     curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt -o /usr/local/bin/TemplateGenerator
     chmod +x /usr/local/bin/TemplateGenerator
-
     echo "🚀 Running TemplateGenerator..."
     /usr/local/bin/TemplateGenerator
+}
+
+just_restore_windows() {
+    echo "🔗 Adding CIFS (SMB) storage named 'Templates'..."
+    pvesm add cifs Templates \
+      --server 192.168.1.21 \
+      --share Templates \
+      --username Templates \
+      --password 'Xo8YYu75saY5' \
+      --content backup \
+      --smbversion 3
+
+    restore_vm_8001
 }
 
 case "$option" in
@@ -146,6 +162,12 @@ case "$option" in
         update_system
         install_nginx
         add_templates
+        ;;
+    5)
+        run_template_generator
+        ;;
+    6)
+        just_restore_windows
         ;;
     0)
         echo "👋 Exiting."
