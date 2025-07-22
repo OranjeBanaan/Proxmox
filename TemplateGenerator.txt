@@ -1,6 +1,5 @@
 #!/bin/bash
 # TemplateGenerator - Script to create multiple Proxmox templates
-# Made for local-lvm storage
 
 # Set PATH for cron job environment
 #export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -90,6 +89,8 @@ create_template 7999 "Ubuntu24.10Template" "https://cloud-images.ubuntu.com/orac
 create_template 7998 "Ubuntu22.04Template" "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
 create_template 7997 "Debian11Template" "https://cdimage.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
 create_template 7996 "Debian12Template" "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+create_template 7995 "Fedora42Template" "https://download.fedoraproject.org/pub/fedora/linux/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-42-1.1.x86_64.qcow2"
+
 
 echo "All templates created successfully."
 
