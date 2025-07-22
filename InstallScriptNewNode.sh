@@ -92,6 +92,16 @@ systemctl daemon-reexec
 systemctl daemon-reload
 systemctl restart nginx
 
+# Add SMB share called 'Templates'
+echo "🔗 Adding CIFS (SMB) storage named 'Templates'..."
+pvesm add cifs Templates \
+  --server 192.168.1.21 \
+  --share Templates \
+  --username Templates \
+  --password 'Xo8YYu75saY5' \
+  --content backup \
+  --smbversion 3
+
 # Download and run TemplateGenerator
 echo "📥 Downloading TemplateGenerator..."
 curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt -o /usr/local/bin/TemplateGenerator
