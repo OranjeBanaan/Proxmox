@@ -30,6 +30,24 @@ update_system() {
 
     echo "📦 Updating system..."
     apt update && apt upgrade -y
+
+    echo "🛠️ Updating GRUB config..."
+    # Backup grub config first
+    cp /etc/default/grub /etc/default/grub.bak
+
+    # Replace or append the kernel cmdline
+    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="quiet intel_iommu=on iommu=pt pcie_acs_override=downstream,multifunction"/' /etc/default/grub
+
+    echo "🔧 Adding VFIO modules to /etc/modules if not already present..."
+    for module in vfio vfio_iommu_type1 vfio_pci vfio_virqfd; do
+        grep -qxF "$module" /etc/modules || echo "$module" >> /etc/modules
+    done
+
+    echo "🔄 Updating initramfs for all kernels..."
+    update-initramfs -u -k all
+
+    echo "📝 Writing kvm modprobe config..."
+    echo "options kvm ignore_msrs=1 report_ignored_msrs=0" > /etc/modprobe.d/kvm.conf
 }
 
 install_nginx() {
