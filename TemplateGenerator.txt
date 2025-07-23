@@ -4,7 +4,10 @@
 # Execute with: bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt)
 # or with bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt?$(date +%s)")
 
-# Ensure required packages
+# Set PATH for cron job environment
+# export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Ensure required packages are installed
 apt install -y libguestfs-tools guestfish
 
 DEBUG_MODE=false
@@ -35,49 +38,22 @@ delete_existing_vm() {
     fi
 }
 
-ensure_snippets_enabled() {
-    local storage_cfg="/etc/pve/storage.cfg"
-    local snippets_path="/var/lib/vz/snippets"
-
-    mkdir -p "$snippets_path"
-
-    if ! grep -q "snippets" "$storage_cfg"; then
-        echo "Configuring 'snippets' support in $storage_cfg..."
-        echo -e "\ndir: local\n    path /var/lib/vz\n    content iso,vztmpl,backup,images,rootdir,snippets" >> "$storage_cfg"
-        pvecm updatecerts -f
-        systemctl restart pvedaemon
-        systemctl restart pveproxy
-        systemctl restart pvestatd
-    else
-        echo "'snippets' already enabled."
-    fi
-}
-
-prepare_cloudinit_snippet() {
-    local name=$1
-    local snippet_path="/var/lib/vz/snippets/${name}-cloudinit.yaml"
-
-    echo "Creating CloudInit snippet for ${name}..."
-    cat > "$snippet_path" <<EOF
-#cloud-config
-packages:
-  - qemu-guest-agent
-runcmd:
-  - systemctl enable qemu-guest-agent
-  - systemctl start qemu-guest-agent
-EOF
-}
-
-customize_image() {
+# Decide whether to apply SELinux relabel based on distro name or content
+use_selinux_relabel() {
     local image_file=$1
     local name=$2
 
-    if [[ "$name" == Fedora* ]]; then
-        echo "⚠️ Skipping virt-customize for Fedora."
-        return
+    # Simple name-based detection
+    if [[ "$name" == Fedora* ]] || [[ "$name" == CentOS* ]] || [[ "$name" == RHEL* ]]; then
+        return 0
     fi
 
-    run_cmd virt-customize -a "$image_file" --install qemu-guest-agent
+    # Optional: Detect SELinux from image contents
+    if guestfish --ro -a "$image_file" -i cat /etc/selinux/config 2>/dev/null | grep -q '^SELINUX='; then
+        return 0
+    fi
+
+    return 1
 }
 
 create_template() {
@@ -87,52 +63,53 @@ create_template() {
     local image_file="${name}-cloudimg.img"
 
     delete_existing_vm "$vmid" "$name"
+
     echo "Generating ${name}..."
 
-    # Step 1: Download cloud image
+    # Step 1: Download the cloud image
     run_cmd wget "${image_url}" -O "${image_file}"
     show_progress 1
 
-    # Step 2: Customize image or prepare snippet
-    customize_image "$image_file" "$name"
-    if [[ "$name" == Fedora* ]]; then
-        prepare_cloudinit_snippet "$name"
+    # Step 2: Install qemu-guest-agent into the image (conditional SELinux relabel)
+    if use_selinux_relabel "$image_file" "$name"; then
+        echo "Applying SELinux relabel to ${name} image"
+        if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent --selinux-relabel; then
+            echo "❌ virt-customize failed on ${name} (SELinux relabel)"
+            return
+        fi
+    else
+        if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent; then
+            echo "❌ virt-customize failed on ${name}"
+            return
+        fi
     fi
     show_progress 2
 
-    # Step 3: Create VM
-    run_cmd qm create "$vmid" --memory 2048 --cpu host --core 2 --name "$name" --net0 virtio,bridge=vmbr0
+    # Step 3: Create new Proxmox VM
+    run_cmd qm create "${vmid}" --memory 2048 --cpu host --core 2 --name "${name}" --net0 virtio,bridge=vmbr0
     show_progress 3
 
     # Step 4: Import disk
-    run_cmd qm disk import "$vmid" "$image_file" local-lvm
+    run_cmd qm disk import "${vmid}" "${image_file}" local-lvm
     show_progress 4
 
     # Step 5: Configure VM
-    run_cmd qm set "$vmid" --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-"$vmid"-disk-0,discard=on,ssd=1
-    run_cmd qm disk resize "$vmid" scsi0 8G
-    run_cmd qm set "$vmid" --ide2 local-lvm:cloudinit
-    run_cmd qm set "$vmid" --boot c --bootdisk scsi0
-    run_cmd qm set "$vmid" --agent enabled=1
-
-    # Step 5.5: Assign CloudInit snippet if Fedora
-    if [[ "$name" == Fedora* ]]; then
-        run_cmd qm set "$vmid" --cicustom "user=local:snippets/${name}-cloudinit.yaml"
-    fi
+    run_cmd qm set "${vmid}" --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-"${vmid}"-disk-0,discard=on,ssd=1
+    run_cmd qm disk resize "${vmid}" scsi0 8G
+    run_cmd qm set "${vmid}" --ide2 local-lvm:cloudinit
+    run_cmd qm set "${vmid}" --boot c --bootdisk scsi0
+    run_cmd qm set "${vmid}" --agent enabled=1
     show_progress 5
 
     # Step 6: Convert to template
-    run_cmd qm template "$vmid"
+    run_cmd qm template "${vmid}"
     show_progress 6
 
     echo -ne "Progress: 100%\n"
     echo "✅ ${name} template created successfully (VMID ${vmid})"
 }
 
-# Ensure Proxmox can use snippets
-ensure_snippets_enabled
-
-# Build templates
+# Create multiple templates
 create_template 8000 "Ubuntu24.04Template" "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 create_template 7999 "Ubuntu24.10Template" "https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-amd64.img"
 create_template 7998 "Ubuntu22.04Template" "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
@@ -140,7 +117,7 @@ create_template 7997 "Debian11Template" "https://cdimage.debian.org/images/cloud
 create_template 7996 "Debian12Template" "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 create_template 7995 "Fedora42Template" "https://download.fedoraproject.org/pub/fedora/linux/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-42-1.1.x86_64.qcow2"
 
-echo "🎉 All templates processed successfully."
+echo "🎉 All templates processed."
 
 # Usage:
 # chmod +x TemplateGenerator
