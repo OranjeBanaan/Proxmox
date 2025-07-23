@@ -57,7 +57,7 @@ install_nginx() {
 
     HOSTNAME=$(hostname -f)
     echo "🛠️ Creating /etc/nginx/conf.d/proxmox.conf..."
-    cat > /etc/nginx/conf.d/proxmox.conf <<EOF
+    cat > /etc/nginx/conf.d/proxmox.conf <<'EOF'
 upstream proxmox {
     server "$HOSTNAME";
 }
@@ -65,7 +65,7 @@ upstream proxmox {
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
-    rewrite ^(.*) https://\$host\$1 permanent;
+    rewrite ^(.*) https://$host$1 permanent;
 }
 
 server {
@@ -77,7 +77,7 @@ server {
     proxy_redirect off;
     location / {
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_pass https://localhost:8006;
         proxy_buffering off;
