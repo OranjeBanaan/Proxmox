@@ -2,6 +2,7 @@
 # TemplateGenerator - Script to create multiple Proxmox templates
 
 # Execute with: bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt)
+# or with bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt?$(date +%s)")
 
 apt install -y libguestfs-tools guestfish
 
