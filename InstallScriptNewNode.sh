@@ -182,6 +182,8 @@ split_vmbr0_to_vmbr1_no_reload() {
         return 1
     fi
 
+    echo "➡️ Moving port $PORT from vmbr0 to vmbr1"
+
     cat <<EOF > "$IF_FILE"
 auto lo
 iface lo inet loopback
@@ -217,14 +219,9 @@ iface vmbr1.104 inet manual
 source /etc/network/interfaces.d/*
 EOF
 
-    echo "🔁 Reloading network interfaces (this may interrupt your session)..."
-    ifdown vmbr0 || true
-    ifup vmbr0 || true
-    ifup vmbr1 || true
-    ifup vmbr1.101 || true
-    ifup vmbr1.104 || true
-
-    echo "✅ Interfaces file rewritten and reloaded."
+    echo "✅ Network config written to ${IF_FILE}"
+    echo "📌 Please run 'reboot' or apply changes manually at the console with:"
+    echo "    systemctl restart networking"
 }
 
 case "$option" in
