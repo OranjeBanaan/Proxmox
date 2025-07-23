@@ -173,28 +173,29 @@ split_vmbr0_to_vmbr1_no_reload() {
     echo "🧷 Backing up ${IF_FILE} → ${BACKUP}"
     cp "$IF_FILE" "$BACKUP" || { echo "❌ Backup failed"; return 1; }
 
+    local CIDR=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /address/ {print $2; exit}' "$IF_FILE")
+    local GATEWAY=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /gateway/ {print $2; exit}')
     local PORT=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /(bridge[-_]ports)/ {for(i=2;i<=NF;i++) print $i; exit}' "$IF_FILE")
-    local CIDR=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /address/   {print $2; exit}' "$IF_FILE")
-    local GATEWAY=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /gateway/  {print $2; exit}' "$IF_FILE")
 
     if [[ -z "$PORT" || -z "$CIDR" ]]; then
         echo "❌ Missing one of: port or address. Aborting."
         return 1
     fi
 
-    echo "➡️ Moving port $PORT from vmbr0 to vmbr1"
+    cat > "$IF_FILE" <<EOF
+auto lo
+iface lo inet loopback
 
-    sed -i \
-        -e "/^iface vmbr0/,/^iface/{s/^\( *\(address\|netmask\|gateway\)\)/#\1/}" \
-        -e "/^iface vmbr0/,/^iface/{/(bridge[-_]ports)/ s/\b${PORT}\b//}" \
-        -e "/^iface vmbr0/,/^iface/{/(bridge[-_]ports)/ s/  */ /g}" \
-        -e "/^iface vmbr0/,/^iface/{/(bridge[-_]ports)/ s/bridge[-_]ports *\$/bridge-ports none/}" \
-        "$IF_FILE"
+iface ${PORT} inet manual
 
-    cat >> "$IF_FILE" <<EOF
+auto vmbr0
+iface vmbr0 inet manual
+    bridge-ports none
+    bridge-stp off
+    bridge-fd 0
+    bridge-vlan-aware yes
+    bridge-vids 2-4094
 
-# --- Added by split_vmbr0_to_vmbr1_no_reload ---
-auto vmbr1
 iface vmbr1 inet manual
     bridge-ports ${PORT}
     bridge-stp off
@@ -206,17 +207,16 @@ auto vmbr1.101
 iface vmbr1.101 inet static
     address ${CIDR}
     gateway ${GATEWAY}
-    vlan-raw-device vmbr1
-    #HostingNetwork
+    # HostingNetwork
 
 auto vmbr1.104
 iface vmbr1.104 inet manual
-    vlan-raw-device vmbr1
-    #HostingNetworkv2
-# ------------------------------------------------
+    # HostingNetworkv2
+
+source /etc/network/interfaces.d/*
 EOF
 
-    echo "✅ Config updated. Reboot or run 'ifreload -a' to apply manually."
+    echo "✅ Interfaces file rewritten. Reboot or reload manually to apply."
 }
 
 case "$option" in
