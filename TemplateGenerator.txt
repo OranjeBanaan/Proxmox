@@ -1,6 +1,8 @@
 #!/bin/bash
 # TemplateGenerator - Script to create multiple Proxmox templates
 
+# Execute with: bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt)
+
 # Set PATH for cron job environment
 # export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
