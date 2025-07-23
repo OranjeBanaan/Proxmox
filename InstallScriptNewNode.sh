@@ -2,6 +2,7 @@
 set -e
 
 # Execute with: bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/InstallScriptNewNode.sh)
+# or with bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/InstallScriptNewNode.sh?$(date +%s)")
 
 echo "🛍️ Proxmox Setup Script with Menu"
 echo "1) Update (no-subscription repos + apt upgrade)"
@@ -173,56 +174,19 @@ split_vmbr0_to_vmbr1_no_reload() {
     echo "🧷 Backing up ${IF_FILE} → ${BACKUP}"
     cp "$IF_FILE" "$BACKUP" || { echo "❌ Backup failed"; return 1; }
 
-    local CIDR=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /address/ {print $2; exit}' "$IF_FILE")
-    local GATEWAY=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /gateway/ {print $2; exit}')
-    local PORT=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /(bridge[-_]ports)/ {for(i=2;i<=NF;i++) print $i; exit}' "$IF_FILE")
+    local PORT=$(awk '/iface vmbr0/{f=1;next} /^iface/{f=0} f && /bridge-ports/ {for (i=2;i<=NF;i++) print $i; exit}' "$IF_FILE")
+    local CIDR=$(awk '/iface vmbr0/{f=1;next} /^iface/{f=0} f && /address/ {print $2; exit}' "$IF_FILE")
+    local GATEWAY=$(awk '/iface vmbr0/{f=1;next} /^iface/{f=0} f && /gateway/ {print $2; exit}' "$IF_FILE")
+
+    echo "🔍 Detected values:"
+    echo "    🔌 PORT:    $PORT"
+    echo "    🌐 CIDR:    $CIDR"
+    echo "    🚪 GATEWAY: $GATEWAY"
 
     if [[ -z "$PORT" || -z "$CIDR" || -z "$GATEWAY" ]]; then
         echo "❌ Missing one of: port, address, or gateway. Aborting."
         return 1
     fi
-
-    echo "➡️ Moving port $PORT from vmbr0 to vmbr1"
-
-    cat <<EOF > "$IF_FILE"
-auto lo
-iface lo inet loopback
-
-iface ${PORT} inet manual
-
-auto vmbr0
-iface vmbr0 inet manual
-    bridge-ports none
-    bridge-stp off
-    bridge-fd 0
-    bridge-vlan-aware yes
-    bridge-vids 2-4094
-
-auto vmbr1
-iface vmbr1 inet manual
-    bridge-ports ${PORT}
-    bridge-stp off
-    bridge-fd 0
-    bridge-vlan-aware yes
-    bridge-vids 2-4094
-
-auto vmbr1.101
-iface vmbr1.101 inet static
-    address ${CIDR}
-    gateway ${GATEWAY}
-    # HostingNetwork
-
-auto vmbr1.104
-iface vmbr1.104 inet manual
-    # HostingNetworkv2
-
-source /etc/network/interfaces.d/*
-EOF
-
-    echo "✅ Network config written to ${IF_FILE}"
-    echo "📌 Please run 'reboot' or apply changes manually at the console with:"
-    echo "    systemctl restart networking"
-}
 
 case "$option" in
     1) update_system ;;
