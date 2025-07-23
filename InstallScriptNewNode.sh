@@ -217,6 +217,62 @@ iface vmbr1.104 inet manual
 source /etc/network/interfaces.d/*
 EOF
 
+    echo "🔁 Reloading network interfaces (this may interrupt your session)..."
+    ifdown vmbr0 || true
+    ifup vmbr0 || true
+    ifup vmbr1 || true
+    ifup vmbr1.101 || true
+    ifup vmbr1.104 || true
+
+    echo "✅ Interfaces file rewritten and reloaded."
+}.bak.$(date +%F-%H%M%S)"
+
+    echo "🧷 Backing up ${IF_FILE} → ${BACKUP}"
+    cp "$IF_FILE" "$BACKUP" || { echo "❌ Backup failed"; return 1; }
+
+    local CIDR=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /address/ {print $2; exit}' "$IF_FILE")
+    local GATEWAY=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /gateway/ {print $2; exit}')
+    local PORT=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /(bridge[-_]ports)/ {for(i=2;i<=NF;i++) print $i; exit}' "$IF_FILE")
+
+    if [[ -z "$PORT" || -z "$CIDR" ]]; then
+        echo "❌ Missing one of: port or address. Aborting."
+        return 1
+    fi
+
+    cat > "$IF_FILE" <<EOF
+auto lo
+iface lo inet loopback
+
+iface ${PORT} inet manual
+
+auto vmbr0
+iface vmbr0 inet manual
+    bridge-ports none
+    bridge-stp off
+    bridge-fd 0
+    bridge-vlan-aware yes
+    bridge-vids 2-4094
+
+iface vmbr1 inet manual
+    bridge-ports ${PORT}
+    bridge-stp off
+    bridge-fd 0
+    bridge-vlan-aware yes
+    bridge-vids 2-4094
+
+auto vmbr1.101
+iface vmbr1.101 inet static
+    address ${CIDR}
+    gateway ${GATEWAY}
+    # HostingNetwork
+
+auto vmbr1.104
+iface vmbr1.104 inet manual
+    # HostingNetworkv2
+
+source /etc/network/interfaces.d/*
+EOF
+
     echo "✅ Interfaces file rewritten. Reboot or reload manually to apply."
 }
 
