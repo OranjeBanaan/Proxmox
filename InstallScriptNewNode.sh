@@ -2,6 +2,7 @@
 set -e
 
 # Execute with: bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/InstallScriptNewNode.sh)
+# or with bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/InstallScriptNewNode.sh?$(date +%s)")
 
 echo "🛍️ Proxmox Setup Script with Menu"
 echo "1) Update (no-subscription repos + apt upgrade)"
