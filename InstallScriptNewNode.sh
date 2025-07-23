@@ -177,12 +177,12 @@ split_vmbr0_to_vmbr1_no_reload() {
     local GATEWAY=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /gateway/ {print $2; exit}')
     local PORT=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /(bridge[-_]ports)/ {for(i=2;i<=NF;i++) print $i; exit}' "$IF_FILE")
 
-    if [[ -z "$PORT" || -z "$CIDR" ]]; then
-        echo "❌ Missing one of: port or address. Aborting."
+    if [[ -z "$PORT" || -z "$CIDR" || -z "$GATEWAY" ]]; then
+        echo "❌ Missing one of: port, address, or gateway. Aborting."
         return 1
     fi
 
-    cat > "$IF_FILE" <<EOF
+    cat <<EOF > "$IF_FILE"
 auto lo
 iface lo inet loopback
 
