@@ -2,7 +2,6 @@
 set -e
 
 # Execute with: bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/InstallScriptNewNode.sh)
-# or with bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/InstallScriptNewNode.sh?$(date +%s)")
 
 echo "🛍️ Proxmox Setup Script with Menu"
 echo "1) Update (no-subscription repos + apt upgrade)"
@@ -175,12 +174,11 @@ split_vmbr0_to_vmbr1_no_reload() {
     cp "$IF_FILE" "$BACKUP" || { echo "❌ Backup failed"; return 1; }
 
     local PORT=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /(bridge[-_]ports)/ {for(i=2;i<=NF;i++) print $i; exit}' "$IF_FILE")
-    local ADDR=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /address/   {print $2; exit}' "$IF_FILE")
-    local NETMASK=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /netmask/  {print $2; exit}' "$IF_FILE")
+    local CIDR=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /address/   {print $2; exit}' "$IF_FILE")
     local GATEWAY=$(awk '/^iface vmbr0/{f=1;next} /^iface/{f=0} f && /gateway/  {print $2; exit}' "$IF_FILE")
 
-    if [[ -z "$PORT" || -z "$ADDR" || -z "$NETMASK" ]]; then
-        echo "❌ Missing one of: port, address, or netmask. Aborting."
+    if [[ -z "$PORT" || -z "$CIDR" ]]; then
+        echo "❌ Missing one of: port or address. Aborting."
         return 1
     fi
 
@@ -202,19 +200,19 @@ iface vmbr1 inet manual
     bridge-stp off
     bridge-fd 0
     bridge-vlan-aware yes
+    bridge-vids 2-4094
 
 auto vmbr1.101
 iface vmbr1.101 inet static
-    address ${ADDR}
-    netmask ${NETMASK}
+    address ${CIDR}
     gateway ${GATEWAY}
     vlan-raw-device vmbr1
-    # HostingNetwork
+    #HostingNetwork
 
 auto vmbr1.104
 iface vmbr1.104 inet manual
     vlan-raw-device vmbr1
-    # HostingNetworkv2
+    #HostingNetworkv2
 # ------------------------------------------------
 EOF
 
@@ -231,11 +229,6 @@ case "$option" in
     7) split_vmbr0_to_vmbr1_no_reload ;;
     0) echo "👋 Exiting."; exit 0 ;;
     *) echo "❌ Invalid option."; exit 1 ;;
-esac
-
-echo "✅ Done!"
-
-        ;;
 esac
 
 echo "✅ Done!"
