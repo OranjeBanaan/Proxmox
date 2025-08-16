@@ -27,42 +27,64 @@ SMB_PASS=${SMB_PASS:-Xo8YYu75saY5}           # Prefer a credentials file in prod
 MOUNT_BASE="/mnt/pve/${SMB_NAME}"
 BACKUP_DIR="${MOUNT_BASE}/dump"
 
-# ---------- Helpers ----------
+# ---------- Helpers (no 'pvesm config' used) ----------
 storage_exists() {
-  # Return 0 if storage exists, else 1
-  if pvesm config "${SMB_NAME}" >/dev/null 2>&1; then
+  # True if the storage entry exists in /etc/pve/storage.cfg or pvesm status lists it
+  if [[ -r /etc/pve/storage.cfg ]] && \
+     grep -Eq "^[[:alnum:]_]+:[[:space:]]*${SMB_NAME}\b" /etc/pve/storage.cfg; then
     return 0
   fi
-  if [[ -f /etc/pve/storage.cfg ]] && grep -qE "^[[:space:]]*storage[[:space:]]*:[[:space:]]*${SMB_NAME}\b" /etc/pve/storage.cfg 2>/dev/null; then
+  if pvesm status 2>/dev/null | awk 'NR>1 && $1==name{found=1} END{exit !found}' name="${SMB_NAME}"; then
     return 0
   fi
   return 1
 }
 
-ensure_backup_content_and_enabled() {
-  # Enable if disabled
-  if pvesm config "${SMB_NAME}" | grep -Eq '^disable(:|)[[:space:]]*1'; then
-    echo "✅ Enabling disabled storage '${SMB_NAME}'..."
-    pvesm set "${SMB_NAME}" --disable 0
-  fi
+get_storage_block_from_cfg() {
+  # Prints the block for SMB_NAME from storage.cfg (if present)
+  [[ -r /etc/pve/storage.cfg ]] || return 0
+  awk -v name="${SMB_NAME}" '
+    BEGIN{inblk=0}
+    /^[[:alnum:]_]+:[[:space:]]*/{
+      # start of a block like "cifs: NAME"
+      blkname=$0
+      sub(/^[[:alnum:]_]+:[[:space:]]*/,"",blkname)
+      gsub(/[[:space:]]+$/,"",blkname)
+      inblk=(blkname==name)
+    }
+    inblk { print }
+  ' /etc/pve/storage.cfg
+}
 
-  # Ensure 'backup' in content types
-  local current_content
-  current_content="$(pvesm config "${SMB_NAME}" | awk -F': ' '/^content/ {print $2}')"
-  if [[ -z "$current_content" ]]; then
-    echo "🧩 Setting storage content to 'backup'..."
-    pvesm set "${SMB_NAME}" --content backup
-  elif ! echo "$current_content" | grep -qw backup; then
-    echo "🧩 Appending 'backup' to content types: ${current_content}"
-    pvesm set "${SMB_NAME}" --content "${current_content},backup"
+get_current_content() {
+  get_storage_block_from_cfg | sed -nE 's/^[[:space:]]*content[[:space:]]+//p' | head -n1
+}
+
+ensure_backup_content_and_enabled() {
+  # Enable (safe even if already enabled)
+  pvesm set "${SMB_NAME}" --disable 0 || true
+
+  # Ensure 'backup' is present in content types
+  local current_content new_content
+  current_content="$(get_current_content || true)"
+  if [[ -z "${current_content}" ]]; then
+    new_content="backup"
+  else
+    # normalise commas (remove spaces)
+    current_content="$(echo "${current_content}" | tr -d ' ')"
+    if [[ ",${current_content}," == *",backup,"* ]]; then
+      new_content="${current_content}"
+    else
+      new_content="${current_content},backup"
+    fi
   fi
+  pvesm set "${SMB_NAME}" --content "${new_content}" || true
 }
 
 refresh_mount() {
   mkdir -p "${MOUNT_BASE}" "${BACKUP_DIR}"
-  # Touch storage to trigger (auto)mount
+  # Touch storage to trigger mount
   pvesm list "${SMB_NAME}" --content backup >/dev/null 2>&1 || true
-  # Nudge daemon and give it a tick
   systemctl restart pvestatd >/dev/null 2>&1 || true
   sleep 1
   if mountpoint -q "${MOUNT_BASE}"; then
@@ -74,7 +96,6 @@ refresh_mount() {
 
 add_or_activate_smb_storage() {
   echo "🔗 Ensuring CIFS (SMB) storage '${SMB_NAME}' is present and active..."
-
   if storage_exists; then
     echo "ℹ️ Storage '${SMB_NAME}' already configured."
   else
@@ -112,18 +133,17 @@ get_next_free_vmid() {
   fi
 }
 
-# Produce a human label for a backup: prefer vzdump NOTES, then VM Name, else filename
+# Prefer vzdump NOTES, then VM Name, else filename
 backup_label_from_metadata() {
   local f="$1"
-  local log="${f%.*}"     # strip last extension (zst/gz/lzo) -> ends with .vma
-  log="${log%.vma}.log"   # turn ...vma -> .log
+  local log="${f%.*}"; log="${log%.vma}.log"
 
   local label=""
   if [[ -f "$log" ]]; then
-    # Notes (case-insensitive) -> last field after ": "
+    # 1) Notes (case-insensitive)
     label="$(grep -iE '^INFO:[[:space:]]*notes?' "$log" | head -n1 | awk -F': ' '{print $NF}')"
+    # 2) Fallback: VM Name
     if [[ -z "$label" ]]; then
-      # Fallback: VM Name
       label="$(grep -iE '^INFO:[[:space:]]*VM Name:' "$log" | head -n1 | awk -F': ' '{print $NF}')"
     fi
   fi
@@ -205,8 +225,6 @@ select_backup_from_smb() {
 restore_vm_8001_latest() {
   VMID=8001
   echo "🔍 Searching for the newest vzdump backup of VM ${VMID} in ${BACKUP_DIR} …"
-
-  # Ensure storage is mounted/active before scanning
   pvesm list "${SMB_NAME}" --content backup >/dev/null 2>&1 || true
   systemctl restart pvestatd >/dev/null 2>&1 || true
   sleep 1
