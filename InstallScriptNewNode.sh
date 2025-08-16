@@ -14,6 +14,7 @@ echo "3) Install NGINX (reverse proxy for web interface)"
 echo "4) All of the above (1,2,3)"
 echo "5) Just run TemplateGenerator script"
 echo "6) Add SMB + interactively choose a backup from SMB to restore (shows .notes/description/name)"
+echo "7) Add iGPU patch (replace GRUB_CMDLINE_LINUX_DEFAULT)"
 echo "0) Exit"
 read -rp "➡️  Select option(s): " options_raw
 
@@ -128,11 +129,8 @@ get_next_free_vmid() {
   fi
 }
 
-# Label for a backup:
-# 1) .notes file next to the archive
-# 2) embedded config (description/name) via pvesm extractconfig
-# 3) .log notes / VM Name
-# 4) filename
+# Label priority:
+# 1) .notes (adjacent)  2) embedded description/name  3) .log notes/VM Name  4) filename
 backup_label_from_metadata() {
   local f="$1"
   local base="$(basename "$f")"
@@ -141,7 +139,6 @@ backup_label_from_metadata() {
   # 1) Adjacent .notes (e.g., vzdump-qemu-8000-...vma.zst.notes)
   local notes="${f}.notes"
   if [[ -f "$notes" ]]; then
-    # Grab first non-empty line, strip CR and outer whitespace; handle files without trailing newline
     label="$(awk 'BEGIN{RS="\r?\n"} NF{gsub(/\r/,""); sub(/^[[:space:]]+/,""); sub(/[[:space:]]+$/,""); print; exit}' "$notes" 2>/dev/null || true)"
     if [[ -n "$label" ]]; then
       printf '%s\n' "$label"
@@ -149,7 +146,7 @@ backup_label_from_metadata() {
     fi
   fi
 
-  # 2) Embedded config
+  # 2) Embedded config (qemu-server.conf) via pvesm extractconfig
   local volid="${SMB_NAME}:backup/${base}"
   if conf="$(pvesm extractconfig "$volid" 2>/dev/null)"; then
     label="$(printf '%s\n' "$conf" | sed -nE 's/^description:[[:space:]]*//p' | head -n1)"
@@ -226,7 +223,7 @@ select_backup_from_smb() {
 
   # Parse VMID from filename: vzdump-qemu-<vmid>-...
   if [[ "$(basename "$CHOSEN")" =~ vzdump-qemu-([0-9]+)- ]]; then
-    SRC_VMID="${BASHREMATCH[1]}"
+    SRC_VMID="${BASH_REMATCH[1]}"
   else
     SRC_VMID="8001"  # fallback
   fi
@@ -268,6 +265,31 @@ run_template_generator() {
   chmod +x /usr/local/bin/TemplateGenerator
   echo "🚀 Running TemplateGenerator..."
   /usr/local/bin/TemplateGenerator
+}
+
+# ---------- New: iGPU patch ----------
+apply_igpu_patch() {
+  echo "🧩 Applying iGPU GRUB patch..."
+  local grub_file="/etc/default/grub"
+  local backup="/etc/default/grub.bak.$(date +%Y%m%d%H%M%S)"
+  cp "$grub_file" "$backup"
+
+  local CMDLINE='quiet intel_iommu=on iommu=pt pcie_acs_override=downstream,multifunction initcall_blacklist=sysfb_init video=simplefb:off video=vesafb:off video=efifb:off video=vesa:off disable_vga=1 vfio_iommu_type1.allow_unsafe_interrupts=1 kvm.ignore_msrs=1 modprobe.blacklist=radeon,nouveau,nvidia,nvidiafb,nvidia-gpu,snd_hda_intel,snd_hda_codec_hdmi,i915 pcie_aspm=off nvme_core.default_ps_max_latency_us=0'
+
+  if grep -qE '^GRUB_CMDLINE_LINUX_DEFAULT=' "$grub_file"; then
+    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$CMDLINE\"|" "$grub_file"
+  else
+    echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$CMDLINE\"" >> "$grub_file"
+  fi
+
+  echo "🔧 Updating GRUB configuration..."
+  if command -v update-grub >/dev/null 2>&1; then
+    update-grub >/dev/null
+  else
+    grub-mkconfig -o /boot/grub/grub.cfg >/dev/null
+  fi
+
+  echo "✅ iGPU patch applied. Backup saved at $backup"
 }
 
 # ---------- Original actions (kept) ----------
@@ -406,6 +428,7 @@ for option in "${expanded_opts[@]}"; do
     3) install_nginx ;;
     5) run_template_generator_only ;;
     6) restore_from_smb_interactive ;;
+    7) apply_igpu_patch ;;
     0) echo "👋 Exiting."; exit 0 ;;
     *) echo "❌ Invalid option: $option"; exit 1 ;;
   esac
