@@ -27,10 +27,16 @@ SMB_PASS=${SMB_PASS:-Xo8YYu75saY5}           # Prefer a credentials file in prod
 BACKUP_DIR="/mnt/pve/${SMB_NAME}/dump"
 
 # ---------- Helpers ----------
-add_smb_storage() {
-  echo "🔗 Ensuring CIFS (SMB) storage '${SMB_NAME}' exists..."
+add_or_activate_smb_storage() {
+  echo "🔗 Ensuring CIFS (SMB) storage '${SMB_NAME}' is present and active..."
   if pvesm config "${SMB_NAME}" >/dev/null 2>&1; then
-    echo "✅ Storage '${SMB_NAME}' already configured."
+    echo "ℹ️ Storage '${SMB_NAME}' already configured."
+
+    # Ensure it's enabled (not disabled)
+    if pvesm config "${SMB_NAME}" | grep -Eq '^disable\s*:\s*1'; then
+      echo "✅ Enabling previously disabled storage '${SMB_NAME}'..."
+      pvesm set "${SMB_NAME}" --disable 0
+    fi
   else
     pvesm add cifs "${SMB_NAME}" \
       --server "${SMB_SERVER}" \
@@ -40,6 +46,20 @@ add_smb_storage() {
       --content backup \
       --smbversion 3
     echo "✅ Storage '${SMB_NAME}' added."
+  fi
+
+  # Trigger (re)mount by asking Proxmox to list the storage; if that fails, poke pvestatd and retry.
+  if ! pvesm list "${SMB_NAME}" --content backup >/dev/null 2>&1; then
+    echo "↻ Triggering mount/refresh for '${SMB_NAME}'..."
+    systemctl restart pvestatd || true
+    sleep 2
+  fi
+
+  # Final info (non-fatal if not yet a mountpoint; Proxmox will still access via pvesm)
+  if mountpoint -q "/mnt/pve/${SMB_NAME}"; then
+    echo "✅ Storage '${SMB_NAME}' mounted at /mnt/pve/${SMB_NAME}"
+  else
+    echo "ℹ️ '${SMB_NAME}' not detected as a mountpoint yet; continuing."
   fi
 }
 
@@ -73,21 +93,39 @@ backup_label_from_metadata() {
   printf '%s\n' "$label"
 }
 
-select_backup_from_smb() {
-  echo "🔎 Looking for backups in ${BACKUP_DIR} ..."
-  if [ ! -d "${BACKUP_DIR}" ]; then
-    echo "❌ Backup directory '${BACKUP_DIR}' not found. Does the SMB share contain a 'dump' folder?"
-    exit 1
-  fi
-
-  # Gather backups (newest first). Match common formats: .vma.zst/.gz/.lzo
-  mapfile -t backups < <(find "${BACKUP_DIR}" -maxdepth 1 -type f \
+scan_backups_fs() {
+  # Filesystem scan under the expected dump directory (requires mount to be active)
+  find "${BACKUP_DIR}" -maxdepth 1 -type f \
     -regextype posix-extended \
     -regex ".*/vzdump-qemu-[0-9]+-.*\.vma\.(zst|gz|lzo)" \
-    -printf "%T@ %p\n" | sort -nr | awk '{ $1=""; sub(/^ /,""); print }')
+    -printf "%T@ %p\n" 2>/dev/null | sort -nr | awk '{ $1=""; sub(/^ /,""); print }'
+}
+
+scan_backups_with_retry() {
+  # Try FS scan; if nothing, nudge Proxmox to mount and retry once.
+  mapfile -t backups < <(scan_backups_fs || true)
+  if [ ${#backups[@]} -eq 0 ]; then
+    echo "⏳ No backups found on first pass; refreshing storage state and retrying..."
+    pvesm list "${SMB_NAME}" --content backup >/dev/null 2>&1 || true
+    systemctl restart pvestatd || true
+    sleep 2
+    mapfile -t backups < <(scan_backups_fs || true)
+  fi
+}
+
+select_backup_from_smb() {
+  echo "🔎 Looking for backups in ${BACKUP_DIR} ..."
+  if [ ! -d "/mnt/pve/${SMB_NAME}" ]; then
+    echo "ℹ️ Creating mount directory placeholder /mnt/pve/${SMB_NAME} (if needed)..."
+    mkdir -p "/mnt/pve/${SMB_NAME}"
+  fi
+  mkdir -p "${BACKUP_DIR}"
+
+  scan_backups_with_retry
 
   if [ ${#backups[@]} -eq 0 ]; then
     echo "❌ No vzdump backups found in ${BACKUP_DIR}"
+    echo "   Tip: ensure the CIFS share contains a 'dump' folder with vzdump-qemu-*.vma.(zst|gz|lzo) files."
     exit 1
   fi
 
@@ -133,6 +171,12 @@ select_backup_from_smb() {
 restore_vm_8001_latest() {
   VMID=8001
   echo "🔍 Searching for the newest vzdump backup of VM ${VMID} in ${BACKUP_DIR} …"
+
+  # Ensure storage is mounted/active before scanning
+  pvesm list "${SMB_NAME}" --content backup >/dev/null 2>&1 || true
+  systemctl restart pvestatd || true
+  sleep 1
+
   LATEST_BACKUP=$(ls -1t ${BACKUP_DIR}/vzdump-qemu-${VMID}-*.vma.* 2>/dev/null | head -n 1 || true)
   if [[ -z "$LATEST_BACKUP" ]]; then
     echo "❌ No vzdump backup files found for VM ${VMID} in ${BACKUP_DIR}"
@@ -256,7 +300,7 @@ EOF
 }
 
 add_templates() {
-  add_smb_storage
+  add_or_activate_smb_storage
   restore_vm_8001_latest
   run_template_generator
 }
@@ -266,7 +310,7 @@ run_template_generator_only() {
 }
 
 restore_from_smb_interactive() {
-  add_smb_storage
+  add_or_activate_smb_storage
   select_backup_from_smb
 }
 
