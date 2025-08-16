@@ -27,26 +27,24 @@ SMB_PASS=${SMB_PASS:-Xo8YYu75saY5}           # Prefer a credentials file in prod
 MOUNT_BASE="/mnt/pve/${SMB_NAME}"
 BACKUP_DIR="${MOUNT_BASE}/dump"
 
-# ---------- Helpers (no 'pvesm config' used) ----------
+# ---------- Helpers (no 'pvesm config' anywhere) ----------
 storage_exists() {
-  # True if the storage entry exists in /etc/pve/storage.cfg or pvesm status lists it
+  # True if storage exists in storage.cfg or pvesm status
   if [[ -r /etc/pve/storage.cfg ]] && \
      grep -Eq "^[[:alnum:]_]+:[[:space:]]*${SMB_NAME}\b" /etc/pve/storage.cfg; then
     return 0
   fi
-  if pvesm status 2>/dev/null | awk 'NR>1 && $1==name{found=1} END{exit !found}' name="${SMB_NAME}"; then
+  if pvesm status 2>/dev/null | awk -v n="${SMB_NAME}" 'NR>1 && $1==n{exit 0} END{exit 1}'; then
     return 0
   fi
   return 1
 }
 
 get_storage_block_from_cfg() {
-  # Prints the block for SMB_NAME from storage.cfg (if present)
   [[ -r /etc/pve/storage.cfg ]] || return 0
   awk -v name="${SMB_NAME}" '
     BEGIN{inblk=0}
     /^[[:alnum:]_]+:[[:space:]]*/{
-      # start of a block like "cifs: NAME"
       blkname=$0
       sub(/^[[:alnum:]_]+:[[:space:]]*/,"",blkname)
       gsub(/[[:space:]]+$/,"",blkname)
@@ -62,7 +60,7 @@ get_current_content() {
 
 ensure_backup_content_and_enabled() {
   # Enable (safe even if already enabled)
-  pvesm set "${SMB_NAME}" --disable 0 || true
+  pvesm set "${SMB_NAME}" --disable 0 >/dev/null 2>&1 || true
 
   # Ensure 'backup' is present in content types
   local current_content new_content
@@ -70,7 +68,6 @@ ensure_backup_content_and_enabled() {
   if [[ -z "${current_content}" ]]; then
     new_content="backup"
   else
-    # normalise commas (remove spaces)
     current_content="$(echo "${current_content}" | tr -d ' ')"
     if [[ ",${current_content}," == *",backup,"* ]]; then
       new_content="${current_content}"
@@ -78,12 +75,11 @@ ensure_backup_content_and_enabled() {
       new_content="${current_content},backup"
     fi
   fi
-  pvesm set "${SMB_NAME}" --content "${new_content}" || true
+  pvesm set "${SMB_NAME}" --content "${new_content}" >/dev/null 2>&1 || true
 }
 
 refresh_mount() {
   mkdir -p "${MOUNT_BASE}" "${BACKUP_DIR}"
-  # Touch storage to trigger mount
   pvesm list "${SMB_NAME}" --content backup >/dev/null 2>&1 || true
   systemctl restart pvestatd >/dev/null 2>&1 || true
   sleep 1
@@ -99,7 +95,6 @@ add_or_activate_smb_storage() {
   if storage_exists; then
     echo "ℹ️ Storage '${SMB_NAME}' already configured."
   else
-    # Try to add; if "already defined", treat as OK
     if ! out="$(pvesm add cifs "${SMB_NAME}" \
         --server "${SMB_SERVER}" \
         --share "${SMB_SHARE}" \
@@ -133,18 +128,34 @@ get_next_free_vmid() {
   fi
 }
 
-# Prefer vzdump NOTES, then VM Name, else filename
+# Label for a backup:
+# 1) Try embedded config via 'pvesm extractconfig <volid>' (works for .vma.zst too)
+# 2) Fallback to nearby .log notes
+# 3) Fallback to filename
 backup_label_from_metadata() {
   local f="$1"
-  local log="${f%.*}"; log="${log%.vma}.log"
-
   local label=""
-  if [[ -f "$log" ]]; then
-    # 1) Notes (case-insensitive)
-    label="$(grep -iE '^INFO:[[:space:]]*notes?' "$log" | head -n1 | awk -F': ' '{print $NF}')"
-    # 2) Fallback: VM Name
+  local conf=""
+
+  # Build a proper volume ID for file-based storage (dir/cifs backups live under 'backup/')
+  local volid="${SMB_NAME}:backup/$(basename "$f")"
+
+  # Try to read embedded qemu-server.conf (prints to stdout)
+  if conf="$(pvesm extractconfig "$volid" 2>/dev/null)"; then
+    # Prefer backup/VM notes stored as description:
+    label="$(printf '%s\n' "$conf" | sed -nE 's/^description:[[:space:]]*//p' | head -n1)"
+    # If no notes, try VM name:
     if [[ -z "$label" ]]; then
-      label="$(grep -iE '^INFO:[[:space:]]*VM Name:' "$log" | head -n1 | awk -F': ' '{print $NF}')"
+      label="$(printf '%s\n' "$conf" | sed -nE 's/^name:[[:space:]]*//p' | head -n1)"
+    fi
+  fi
+
+  if [[ -z "$label" ]]; then
+    # Optional: parse the .log sitting next to the vma.* (if present)
+    local log="${f%.*}"; log="${log%.vma}.log"
+    if [[ -f "$log" ]]; then
+      label="$(sed -nE 's/^INFO:[[:space:]]*notes?[[:space:]]*:[[:space:]]*//Ip' "$log" | head -n1)"
+      [[ -z "$label" ]] && label="$(sed -nE 's/^INFO:[[:space:]]*VM Name:[[:space:]]*//Ip' "$log" | head -n1)"
     fi
   fi
 
@@ -153,10 +164,9 @@ backup_label_from_metadata() {
 }
 
 scan_backups_fs() {
-  # Filesystem scan under the expected dump directory (newest first)
   find "${BACKUP_DIR}" -maxdepth 1 -type f \
     -regextype posix-extended \
-    -regex ".*/vzdump-qemu-[0-9]+-.*\.vma\.(zst|gz|lzo)" \
+    -regex ".*/vzdump-qemu-[0-9]+-.*\\.vma\\.(zst|gz|lzo)" \
     -printf "%T@ %p\n" 2>/dev/null | sort -nr | awk '{ $1=""; sub(/^ /,""); print }'
 }
 
@@ -179,7 +189,7 @@ select_backup_from_smb() {
 
   if [ ${#backups[@]} -eq 0 ]; then
     echo "❌ No vzdump backups found in ${BACKUP_DIR}"
-    echo "   Tip: ensure the CIFS share contains a 'dump' folder with vzdump-qemu-*.vma.(zst|gz|lzo) files and their .log files."
+    echo "   Tip: ensure the CIFS share contains a 'dump' folder with vzdump-qemu-*.vma.(zst|gz|lzo) files."
     exit 1
   fi
 
@@ -367,10 +377,8 @@ restore_from_smb_interactive() {
 }
 
 # ---------- Execute selections (multi) ----------
-# Normalize separators: turn commas into spaces
-options_norm="${options_raw//,/ }"
+options_norm="${options_raw//,/ }"  # normalize commas to spaces
 
-# If user selected 4, expand it to 1 2 3 (still allows combos like "4 5")
 expanded_opts=()
 for token in $options_norm; do
   case "$token" in
