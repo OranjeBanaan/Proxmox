@@ -13,7 +13,7 @@ echo "2) Add Templates (mount SMB, restore Windows VM 8001 (latest), run generat
 echo "3) Install NGINX (reverse proxy for web interface)"
 echo "4) All of the above (1,2,3)"
 echo "5) Just run TemplateGenerator script"
-echo "6) Add SMB + interactively choose a backup from SMB to restore (shows backup NOTES)"
+echo "6) Add SMB + interactively choose a backup from SMB to restore (shows .notes/description/name)"
 echo "0) Exit"
 read -rp "➡️  Select option(s): " options_raw
 
@@ -129,38 +129,50 @@ get_next_free_vmid() {
 }
 
 # Label for a backup:
-# 1) Try embedded config via 'pvesm extractconfig <volid>' (works for .vma.zst too)
-# 2) Fallback to nearby .log notes
-# 3) Fallback to filename
+# 1) .notes file next to the archive
+# 2) embedded config (description/name) via pvesm extractconfig
+# 3) .log notes / VM Name
+# 4) filename
 backup_label_from_metadata() {
   local f="$1"
-  local label=""
-  local conf=""
+  local base="$(basename "$f")"
+  local label="" conf=""
 
-  # Build a proper volume ID for file-based storage (dir/cifs backups live under 'backup/')
-  local volid="${SMB_NAME}:backup/$(basename "$f")"
+  # 1) Adjacent .notes (e.g., vzdump-qemu-8000-...vma.zst.notes)
+  local notes="${f}.notes"
+  if [[ -f "$notes" ]]; then
+    # Grab first non-empty line, strip CR and outer whitespace; handle files without trailing newline
+    label="$(awk 'BEGIN{RS="\r?\n"} NF{gsub(/\r/,""); sub(/^[[:space:]]+/,""); sub(/[[:space:]]+$/,""); print; exit}' "$notes" 2>/dev/null || true)"
+    if [[ -n "$label" ]]; then
+      printf '%s\n' "$label"
+      return 0
+    fi
+  fi
 
-  # Try to read embedded qemu-server.conf (prints to stdout)
+  # 2) Embedded config
+  local volid="${SMB_NAME}:backup/${base}"
   if conf="$(pvesm extractconfig "$volid" 2>/dev/null)"; then
-    # Prefer backup/VM notes stored as description:
     label="$(printf '%s\n' "$conf" | sed -nE 's/^description:[[:space:]]*//p' | head -n1)"
-    # If no notes, try VM name:
-    if [[ -z "$label" ]]; then
-      label="$(printf '%s\n' "$conf" | sed -nE 's/^name:[[:space:]]*//p' | head -n1)"
+    [[ -z "$label" ]] && label="$(printf '%s\n' "$conf" | sed -nE 's/^name:[[:space:]]*//p' | head -n1)"
+    if [[ -n "$label" ]]; then
+      printf '%s\n' "$label"
+      return 0
     fi
   fi
 
-  if [[ -z "$label" ]]; then
-    # Optional: parse the .log sitting next to the vma.* (if present)
-    local log="${f%.*}"; log="${log%.vma}.log"
-    if [[ -f "$log" ]]; then
-      label="$(sed -nE 's/^INFO:[[:space:]]*notes?[[:space:]]*:[[:space:]]*//Ip' "$log" | head -n1)"
-      [[ -z "$label" ]] && label="$(sed -nE 's/^INFO:[[:space:]]*VM Name:[[:space:]]*//Ip' "$log" | head -n1)"
+  # 3) .log next to archive
+  local log="${f%.*}"; log="${log%.vma}.log"
+  if [[ -f "$log" ]]; then
+    label="$(sed -nE 's/^INFO:[[:space:]]*notes?[[:space:]]*:[[:space:]]*//Ip' "$log" | head -n1)"
+    [[ -z "$label" ]] && label="$(sed -nE 's/^INFO:[[:space:]]*VM Name:[[:space:]]*//Ip' "$log" | head -n1)"
+    if [[ -n "$label" ]]; then
+      printf '%s\n' "$label"
+      return 0
     fi
   fi
 
-  [[ -z "$label" ]] && label="$(basename "$f")"
-  printf '%s\n' "$label"
+  # 4) Fallback: filename
+  printf '%s\n' "$base"
 }
 
 scan_backups_fs() {
@@ -189,7 +201,7 @@ select_backup_from_smb() {
 
   if [ ${#backups[@]} -eq 0 ]; then
     echo "❌ No vzdump backups found in ${BACKUP_DIR}"
-    echo "   Tip: ensure the CIFS share contains a 'dump' folder with vzdump-qemu-*.vma.(zst|gz|lzo) files."
+    echo "   Tip: ensure the CIFS share contains a 'dump' folder with vzdump-qemu-*.vma.(zst|gz|lzo) files (and optional .notes/.log)."
     exit 1
   fi
 
@@ -214,7 +226,7 @@ select_backup_from_smb() {
 
   # Parse VMID from filename: vzdump-qemu-<vmid>-...
   if [[ "$(basename "$CHOSEN")" =~ vzdump-qemu-([0-9]+)- ]]; then
-    SRC_VMID="${BASH_REMATCH[1]}"
+    SRC_VMID="${BASHREMATCH[1]}"
   else
     SRC_VMID="8001"  # fallback
   fi
