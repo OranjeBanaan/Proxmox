@@ -9,24 +9,24 @@ echo "🧭 Proxmox Setup Script with Multi-Select Menu"
 echo "You can run multiple steps at once. Examples: '1 3 6' or '1,3,6'"
 echo
 echo "1) Update (no-subscription repos + apt upgrade)"
-echo "2) Add Templates (mount SMB, restore Windows VM, run generator)"
+echo "2) Add Templates (mount SMB, restore Windows VM 8001 (latest), run generator)"
 echo "3) Install NGINX (reverse proxy for web interface)"
-echo "4) All of the above"
+echo "4) All of the above (1,2,3)"
 echo "5) Just run TemplateGenerator script"
-echo "6) Add SMB + interactively choose a backup from SMB to restore"
+echo "6) Add SMB + interactively choose a backup from SMB to restore (shows backup NOTES)"
 echo "0) Exit"
 read -rp "➡️  Select option(s): " options_raw
 
-# ---------- Helpers ----------
-
-TARGET_STORAGE=${TARGET_STORAGE:-local-lvm}   # change if you want a different storage target
+# ---------- Configurable defaults (override via env) ----------
+TARGET_STORAGE=${TARGET_STORAGE:-local-lvm}   # Storage to restore VMs to
 SMB_NAME=${SMB_NAME:-Templates}
 SMB_SERVER=${SMB_SERVER:-192.168.1.21}
 SMB_SHARE=${SMB_SHARE:-Templates}
 SMB_USER=${SMB_USER:-Templates}
-SMB_PASS=${SMB_PASS:-'Xo8YYu75saY5'}
+SMB_PASS=${SMB_PASS:-Xo8YYu75saY5}           # Prefer a credentials file in production
 BACKUP_DIR="/mnt/pve/${SMB_NAME}/dump"
 
+# ---------- Helpers ----------
 add_smb_storage() {
   echo "🔗 Ensuring CIFS (SMB) storage '${SMB_NAME}' exists..."
   if pvesm config "${SMB_NAME}" >/dev/null 2>&1; then
@@ -47,11 +47,30 @@ get_next_free_vmid() {
   if command -v pvesh >/dev/null 2>&1; then
     pvesh get /cluster/nextid
   else
-    # Fallback if pvesh unavailable (unlikely)
     local id=100
     while qm status "$id" >/dev/null 2>&1; do id=$((id+1)); done
     echo "$id"
   fi
+}
+
+# Produce a human label for a backup: prefer vzdump NOTES, then VM Name, else filename
+backup_label_from_metadata() {
+  local f="$1"
+  local log="${f%.*}"     # strip last extension (zst/gz/lzo) -> ends with .vma
+  log="${log%.vma}.log"   # turn ...vma -> .log
+
+  local label=""
+  if [[ -f "$log" ]]; then
+    # Prefer explicit Notes captured by vzdump hooks or UI
+    label="$(sed -nE 's/^INFO: *notes?: *//Ip' "$log" | head -n1)"
+    if [[ -z "$label" ]]; then
+      # Fallback to VM Name line if present
+      label="$(sed -nE 's/^INFO: *VM Name: *//Ip' "$log" | head -n1)"
+    fi
+  fi
+
+  [[ -z "$label" ]] && label="$(basename "$f")"
+  printf '%s\n' "$label"
 }
 
 select_backup_from_smb() {
@@ -75,8 +94,7 @@ select_backup_from_smb() {
   echo "📋 Available backups (newest first):"
   local i=1
   for f in "${backups[@]}"; do
-    # Show a compact label: filename only
-    echo "  $i) $(basename "$f")"
+    echo "  $i) $(backup_label_from_metadata "$f")"
     i=$((i+1))
   done
 
@@ -90,7 +108,7 @@ select_backup_from_smb() {
   done
 
   CHOSEN="${backups[$((sel-1))]}"
-  echo "✅ Selected: $(basename "$CHOSEN")"
+  echo "✅ Selected file: $(basename "$CHOSEN")"
 
   # Parse VMID from filename: vzdump-qemu-<vmid>-...
   if [[ "$(basename "$CHOSEN")" =~ vzdump-qemu-([0-9]+)- ]]; then
@@ -135,7 +153,6 @@ run_template_generator() {
 }
 
 # ---------- Original actions (kept) ----------
-
 update_system() {
   echo "🔧 Replacing Proxmox and Ceph enterprise repos with no-subscription versions..."
 
@@ -254,12 +271,10 @@ restore_from_smb_interactive() {
 }
 
 # ---------- Execute selections (multi) ----------
-
 # Normalize separators: turn commas into spaces
 options_norm="${options_raw//,/ }"
 
-# If user selected 4, expand it to 1 2 3
-# (We still allow combos like "4 5" if they want generator too.)
+# If user selected 4, expand it to 1 2 3 (still allows combos like "4 5")
 expanded_opts=()
 for token in $options_norm; do
   case "$token" in
