@@ -308,7 +308,7 @@ update_system() {
     cp /etc/apt/sources.list.d/ceph.list /etc/apt/sources.list.d/ceph.list.bak
     {
       echo "# Replaced by script"
-      echo "deb http://download.proxmox.com/debian/ceph-quincy bookworm pve-no-subscription"
+      echo "deb http://download.proxmox.com/debian/ceph-quincy bookworm no-subscription"
     } > /etc/apt/sources.list.d/ceph.list
   fi
 
