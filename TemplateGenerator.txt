@@ -1,124 +1,210 @@
 #!/bin/bash
-# TemplateGenerator - Script to create multiple Proxmox templates
+# TemplateGenerator - Script to create multiple Proxmox templates with multi-select menu
+#
+# Execute with:
+#   bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt)
+#   or:
+#   bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt?$(date +%s)")
 
-# Execute with: bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt)
-# or with bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt?$(date +%s)")
+set -o pipefail
 
-# Set PATH for cron job environment
-# export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-# Ensure required packages are installed
-apt install -y libguestfs-tools guestfish
-
+# ===== Config =====
 DEBUG_MODE=false
+# Proxmox storage to use for imported disks + cloud-init
+PVE_STORAGE="local-lvm"
 
+# ===== Helpers =====
 run_cmd() {
-    if [ "$DEBUG_MODE" = true ]; then
-        "$@"
-    else
-        "$@" > /dev/null 2>&1
-    fi
+  if [ "$DEBUG_MODE" = true ]; then
+    "$@"
+  else
+    "$@" >/dev/null 2>&1
+  fi
 }
 
 show_progress() {
-    local current_step=$1
-    local total_steps=6
-    local progress=$(( (current_step * 100) / total_steps ))
-    echo -ne "Progress: ${progress}%\r"
+  local current_step=$1
+  local total_steps=6
+  local progress=$(( (current_step * 100) / total_steps ))
+  echo -ne "Progress: ${progress}%\r"
 }
 
 delete_existing_vm() {
-    local vmid=$1
-    local name=$2
-
-    if qm status "$vmid" &> /dev/null; then
-        echo "Deleting ${name}..."
-        run_cmd qm stop "$vmid"
-        run_cmd qm destroy "$vmid" --destroy-unreferenced-disks
-    fi
+  local vmid=$1
+  local name=$2
+  if qm status "$vmid" &>/dev/null; then
+    echo "Deleting ${name}..."
+    run_cmd qm stop "$vmid"
+    run_cmd qm destroy "$vmid" --destroy-unreferenced-disks
+  fi
 }
 
 # Decide whether to apply SELinux relabel based on distro name or content
 use_selinux_relabel() {
-    local image_file=$1
-    local name=$2
+  local image_file=$1
+  local name=$2
 
-    # Simple name-based detection
-    if [[ "$name" == Fedora* ]] || [[ "$name" == CentOS* ]] || [[ "$name" == RHEL* ]]; then
-        return 0
-    fi
+  # Name-based fast path
+  if [[ "$name" == Fedora* ]] || [[ "$name" == CentOS* ]] || [[ "$name" == RHEL* ]] || \
+     [[ "$name" == AlmaLinux* ]] || [[ "$name" == Rocky* ]]; then
+    return 0
+  fi
 
-    # Optional: Detect SELinux from image contents
-    if guestfish --ro -a "$image_file" -i cat /etc/selinux/config 2>/dev/null | grep -q '^SELINUX='; then
-        return 0
-    fi
+  # Content-based detection (best-effort)
+  if guestfish --ro -a "$image_file" -i cat /etc/selinux/config 2>/dev/null | grep -q '^SELINUX='; then
+    return 0
+  fi
 
-    return 1
+  return 1
 }
 
 create_template() {
-    local vmid=$1
-    local name=$2
-    local image_url=$3
-    local image_file="${name}-cloudimg.img"
+  local vmid=$1
+  local name=$2
+  local image_url=$3
+  local image_file="${name}-cloudimg.img"
 
-    delete_existing_vm "$vmid" "$name"
+  delete_existing_vm "$vmid" "$name"
 
-    echo "Generating ${name}..."
+  echo "Generating ${name}..."
 
-    # Step 1: Download the cloud image
-    run_cmd wget "${image_url}" -O "${image_file}"
-    show_progress 1
+  # Step 1: Download the cloud image
+  if ! wget -q --show-progress --progress=bar:force:noscroll "${image_url}" -O "${image_file}"; then
+    echo "❌ Failed to download image for ${name} from ${image_url}"
+    return 1
+  fi
+  show_progress 1
 
-    # Step 2: Install qemu-guest-agent into the image (conditional SELinux relabel)
-    if use_selinux_relabel "$image_file" "$name"; then
-        echo "Applying SELinux relabel to ${name} image"
-        if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent --selinux-relabel; then
-            echo "❌ virt-customize failed on ${name} (SELinux relabel)"
-            return
-        fi
-    else
-        if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent; then
-            echo "❌ virt-customize failed on ${name}"
-            return
-        fi
+  # Step 2: Install qemu-guest-agent into the image (conditional SELinux relabel)
+  if use_selinux_relabel "$image_file" "$name"; then
+    echo "Applying SELinux relabel to ${name} image"
+    if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent --selinux-relabel; then
+      echo "❌ virt-customize failed on ${name} (SELinux relabel)"
+      return 1
     fi
-    show_progress 2
+  else
+    if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent; then
+      echo "❌ virt-customize failed on ${name}"
+      return 1
+    fi
+  fi
+  show_progress 2
 
-    # Step 3: Create new Proxmox VM
-    run_cmd qm create "${vmid}" --memory 2048 --cpu host --core 2 --name "${name}" --net0 virtio,bridge=vmbr0
-    show_progress 3
+  # Step 3: Create new Proxmox VM
+  run_cmd qm create "${vmid}" --memory 2048 --cpu host --cores 2 --name "${name}" --net0 virtio,bridge=vmbr0
+  show_progress 3
 
-    # Step 4: Import disk
-    run_cmd qm disk import "${vmid}" "${image_file}" local-lvm
-    show_progress 4
+  # Step 4: Import disk
+  run_cmd qm disk import "${vmid}" "${image_file}" "${PVE_STORAGE}"
+  show_progress 4
 
-    # Step 5: Configure VM
-    run_cmd qm set "${vmid}" --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-"${vmid}"-disk-0,discard=on,ssd=1
-    run_cmd qm disk resize "${vmid}" scsi0 8G
-    run_cmd qm set "${vmid}" --ide2 local-lvm:cloudinit
-    run_cmd qm set "${vmid}" --boot c --bootdisk scsi0
-    run_cmd qm set "${vmid}" --agent enabled=1
-    show_progress 5
+  # Step 5: Configure VM
+  run_cmd qm set "${vmid}" --scsihw virtio-scsi-pci --scsi0 "${PVE_STORAGE}:vm-${vmid}-disk-0,discard=on,ssd=1"
+  run_cmd qm disk resize "${vmid}" scsi0 8G
+  run_cmd qm set "${vmid}" --ide2 "${PVE_STORAGE}:cloudinit"
+  run_cmd qm set "${vmid}" --boot c --bootdisk scsi0
+  run_cmd qm set "${vmid}" --agent enabled=1
+  show_progress 5
 
-    # Step 6: Convert to template
-    run_cmd qm template "${vmid}"
-    show_progress 6
+  # Step 6: Convert to template
+  run_cmd qm template "${vmid}"
+  show_progress 6
 
-    echo -ne "Progress: 100%\n"
-    echo "✅ ${name} template created successfully (VMID ${vmid})"
+  echo -ne "Progress: 100%\n"
+  echo "✅ ${name} template created successfully (VMID ${vmid})"
 }
 
-# Create multiple templates
-create_template 8000 "Ubuntu24.04Template" "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
-create_template 7999 "Ubuntu24.10Template" "https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-amd64.img"
-create_template 7998 "Ubuntu22.04Template" "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
-create_template 7997 "Debian11Template" "https://cdimage.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
-create_template 7996 "Debian12Template" "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
-create_template 7995 "Fedora42Template" "https://download.fedoraproject.org/pub/fedora/linux/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-42-1.1.x86_64.qcow2"
+# ===== Ensure deps =====
+echo "🔎 Installing required packages (libguestfs-tools, guestfish, qemu-utils, whiptail, wget)..."
+apt update -y >/dev/null 2>&1
+apt install -y libguestfs-tools guestfish qemu-utils whiptail wget >/dev/null 2>&1
 
-echo "🎉 All templates processed."
+# ===== Template registry (id | name | url) =====
+# You can add/edit entries here. IDs must be unique.
+declare -A TEMPLATE_VMID
+declare -A TEMPLATE_NAME
+declare -A TEMPLATE_URL
 
-# Usage:
-# chmod +x TemplateGenerator
-# ./TemplateGenerator
+TEMPLATE_VMID["Ubuntu24.04"]=8000
+TEMPLATE_NAME["Ubuntu24.04"]="Ubuntu24.04Template"
+TEMPLATE_URL["Ubuntu24.04"]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+
+TEMPLATE_VMID["Ubuntu24.10"]=7999
+TEMPLATE_NAME["Ubuntu24.10"]="Ubuntu24.10Template"
+TEMPLATE_URL["Ubuntu24.10"]="https://cloud-images.ubuntu.com/oracular/current/oracular-server-cloudimg-amd64.img"
+
+TEMPLATE_VMID["Ubuntu22.04"]=7998
+TEMPLATE_NAME["Ubuntu22.04"]="Ubuntu22.04Template"
+TEMPLATE_URL["Ubuntu22.04"]="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+
+TEMPLATE_VMID["Debian11"]=7997
+TEMPLATE_NAME["Debian11"]="Debian11Template"
+TEMPLATE_URL["Debian11"]="https://cdimage.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
+
+TEMPLATE_VMID["Debian12"]=7996
+TEMPLATE_NAME["Debian12"]="Debian12Template"
+TEMPLATE_URL["Debian12"]="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+
+TEMPLATE_VMID["Fedora42"]=7995
+TEMPLATE_NAME["Fedora42"]="Fedora42Template"
+TEMPLATE_URL["Fedora42"]="https://download.fedoraproject.org/pub/fedora/linux/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-42-1.1.x86_64.qcow2"
+
+# ⭐ New: AlmaLinux 8
+TEMPLATE_VMID["AlmaLinux8"]=7994
+TEMPLATE_NAME["AlmaLinux8"]="AlmaLinux8Template"
+TEMPLATE_URL["AlmaLinux8"]="https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-latest.x86_64.qcow2"
+
+# ===== Interactive multi-select menu (whiptail) =====
+# If script is run with arguments, treat them as keys and skip menu.
+SELECTED_KEYS=()
+
+if [ "$#" -gt 0 ]; then
+  # Non-interactive: allow passing keys like "Ubuntu24.04 Debian12 AlmaLinux8"
+  SELECTED_KEYS=("$@")
+else
+  # Build checklist items: tag, description, status
+  MENU_ITEMS=(
+    "Ubuntu24.04" "Ubuntu 24.04 LTS" ON
+    "Ubuntu24.10" "Ubuntu 24.10" OFF
+    "Ubuntu22.04" "Ubuntu 22.04 LTS" OFF
+    "Debian11"    "Debian 11 (Bullseye)" OFF
+    "Debian12"    "Debian 12 (Bookworm)" ON
+    "Fedora42"    "Fedora 42 Cloud" ON
+    "AlmaLinux8"  "AlmaLinux 8 GenericCloud" ON
+  )
+
+  CHOICES=$(whiptail --title "Template Generator" \
+            --checklist "Select templates to generate (SPACE to toggle, ENTER to confirm)" \
+            20 78 12 \
+            "${MENU_ITEMS[@]}" \
+            3>&1 1>&2 2>&3)
+
+  # whiptail outputs quoted tags; strip quotes and split
+  if [ $? -ne 0 ]; then
+    echo "Cancelled."
+    exit 1
+  fi
+
+  # shellcheck disable=SC2206
+  SELECTED_KEYS=(${CHOICES//\"/})
+fi
+
+if [ ${#SELECTED_KEYS[@]} -eq 0 ]; then
+  echo "No templates selected."
+  exit 0
+fi
+
+echo "🏗  Starting generation for: ${SELECTED_KEYS[*]}"
+
+# ===== Main loop =====
+for key in "${SELECTED_KEYS[@]}"; do
+  if [[ -z "${TEMPLATE_VMID[$key]}" ]]; then
+    echo "⚠️  Unknown template key: ${key} (skipping)"
+    continue
+  fi
+  create_template "${TEMPLATE_VMID[$key]}" "${TEMPLATE_NAME[$key]}" "${TEMPLATE_URL[$key]}"
+done
+
+echo "🎉 All selected templates processed."
+echo "Tip: run non-interactively like:"
+echo "  ./TemplateGenerator Ubuntu24.04 Debian12 AlmaLinux8"
