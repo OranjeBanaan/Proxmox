@@ -1,20 +1,24 @@
 #!/bin/bash
-# TemplateGenerator - Script to create multiple Proxmox templates with multi-select menu
+# TemplateGenerator - Create multiple Proxmox templates with a multi-select menu
 #
-# Execute with:
+# Run:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt)
 #   or:
 #   bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt?$(date +%s)")
+#
+# Non-interactive examples:
+#   ./TemplateGenerator --debug Ubuntu24.04 Debian12 AlmaLinux8
+#   DEBUG_MODE=1 ./TemplateGenerator Ubuntu24.04
 
 set -o pipefail
 
 # ===== Config =====
-DEBUG_MODE=false
-# Proxmox storage to use for imported disks + cloud-init
-PVE_STORAGE="local-lvm"
+DEBUG_MODE=false                     # default; can be overridden via --debug / --no-debug or env
+PVE_STORAGE="${PVE_STORAGE:-local-lvm}"  # Proxmox storage for disks + cloud-init
 
 # ===== Helpers =====
 run_cmd() {
+  # Run command verbosely in debug mode; otherwise suppress stdout+stderr but keep exit code.
   if [ "$DEBUG_MODE" = true ]; then
     "$@"
   else
@@ -24,7 +28,7 @@ run_cmd() {
 
 show_progress() {
   local current_step=$1
-  local total_steps=6
+  local total_steps=7  # we added a cleanup step
   local progress=$(( (current_step * 100) / total_steps ))
   echo -ne "Progress: ${progress}%\r"
 }
@@ -33,24 +37,24 @@ delete_existing_vm() {
   local vmid=$1
   local name=$2
   if qm status "$vmid" &>/dev/null; then
-    echo "Deleting ${name}..."
+    echo "Deleting ${name} (VMID ${vmid})..."
     run_cmd qm stop "$vmid"
     run_cmd qm destroy "$vmid" --destroy-unreferenced-disks
   fi
 }
 
-# Decide whether to apply SELinux relabel based on distro name or content
+# Decide whether to apply SELinux relabel based on distro name or image contents
 use_selinux_relabel() {
   local image_file=$1
   local name=$2
 
-  # Name-based fast path
+  # Fast path by name
   if [[ "$name" == Fedora* ]] || [[ "$name" == CentOS* ]] || [[ "$name" == RHEL* ]] || \
      [[ "$name" == AlmaLinux* ]] || [[ "$name" == Rocky* ]]; then
     return 0
   fi
 
-  # Content-based detection (best-effort)
+  # Best-effort content detection
   if guestfish --ro -a "$image_file" -i cat /etc/selinux/config 2>/dev/null | grep -q '^SELINUX='; then
     return 0
   fi
@@ -62,43 +66,58 @@ create_template() {
   local vmid=$1
   local name=$2
   local image_url=$3
-  local image_file="${name}-cloudimg.img"
+
+  # Derive a local filename from the URL if possible; otherwise keep provided naming
+  local img_ext="${image_url##*.}"
+  case "$img_ext" in
+    qcow2|img) : ;;   # keep
+    *) img_ext="img" ;;
+  esac
+  local image_file="${name}-cloudimg.${img_ext}"
 
   delete_existing_vm "$vmid" "$name"
 
-  echo "Generating ${name}..."
+  echo "Generating ${name} (VMID ${vmid})..."
 
-  # Step 1: Download the cloud image
+  # Step 1: Download cloud image
   if ! wget -q --show-progress --progress=bar:force:noscroll "${image_url}" -O "${image_file}"; then
     echo "❌ Failed to download image for ${name} from ${image_url}"
     return 1
   fi
   show_progress 1
 
-  # Step 2: Install qemu-guest-agent into the image (conditional SELinux relabel)
-  if use_selinux_relabel "$image_file" "$name"; then
-    echo "Applying SELinux relabel to ${name} image"
-    if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent --selinux-relabel; then
-      echo "❌ virt-customize failed on ${name} (SELinux relabel)"
-      return 1
+  # Step 2: Prepare image (install qemu-guest-agent); handle SELinux relabel if needed
+  if command -v virt-customize >/dev/null 2>&1; then
+    if use_selinux_relabel "$image_file" "$name"; then
+      echo "Applying SELinux relabel to ${name} image"
+      if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent --selinux-relabel; then
+        echo "❌ virt-customize failed on ${name} (SELinux relabel)"
+        return 1
+      fi
+    else
+      if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent; then
+        echo "❌ virt-customize failed on ${name}"
+        return 1
+      fi
     fi
   else
-    if ! run_cmd virt-customize -a "${image_file}" --install qemu-guest-agent; then
-      echo "❌ virt-customize failed on ${name}"
-      return 1
-    fi
+    echo "⚠️  Skipping virt-customize for ${name}: tool not available."
+    echo "    (You can still install qemu-guest-agent later via cloud-init or manually.)"
   fi
   show_progress 2
 
-  # Step 3: Create new Proxmox VM
+  # Step 3: Create VM shell
   run_cmd qm create "${vmid}" --memory 2048 --cpu host --cores 2 --name "${name}" --net0 virtio,bridge=vmbr0
   show_progress 3
 
   # Step 4: Import disk
-  run_cmd qm disk import "${vmid}" "${image_file}" "${PVE_STORAGE}"
+  if ! run_cmd qm disk import "${vmid}" "${image_file}" "${PVE_STORAGE}"; then
+    echo "❌ Failed to import disk for ${name}"
+    return 1
+  fi
   show_progress 4
 
-  # Step 5: Configure VM
+  # Step 5: VM config
   run_cmd qm set "${vmid}" --scsihw virtio-scsi-pci --scsi0 "${PVE_STORAGE}:vm-${vmid}-disk-0,discard=on,ssd=1"
   run_cmd qm disk resize "${vmid}" scsi0 8G
   run_cmd qm set "${vmid}" --ide2 "${PVE_STORAGE}:cloudinit"
@@ -110,17 +129,36 @@ create_template() {
   run_cmd qm template "${vmid}"
   show_progress 6
 
+  # Step 7: Cleanup local image
+  run_cmd rm -f "${image_file}"
+  show_progress 7
+
   echo -ne "Progress: 100%\n"
   echo "✅ ${name} template created successfully (VMID ${vmid})"
 }
 
-# ===== Ensure deps =====
-echo "🔎 Installing required packages (libguestfs-tools, guestfish, qemu-utils, whiptail, wget)..."
-apt update -y >/dev/null 2>&1
-apt install -y libguestfs-tools guestfish qemu-utils whiptail wget >/dev/null 2>&1
+# ===== Ensure dependencies (loud + verified) =====
+# (Do this loudly so you can see failures; later steps honor DEBUG_MODE for noise control)
+need_pkgs=(libguestfs-tools guestfish qemu-utils whiptail wget)
+echo "🔎 Ensuring required packages: ${need_pkgs[*]} ..."
+if ! { apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y "${need_pkgs[@]}"; }; then
+  echo "❌ Package install failed. Try manually: apt-get update && apt-get install -y ${need_pkgs[*]}"
+  exit 1
+fi
+
+# Double-check critical tools
+for bin in guestfish wget qm; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    echo "❌ Required binary '$bin' not found even after install. Aborting."
+    exit 1
+  fi
+done
+# virt-customize is optional; warn if missing
+if ! command -v virt-customize >/dev/null 2>&1; then
+  echo "ℹ️  'virt-customize' not found — image customization will be skipped (OK)."
+fi
 
 # ===== Template registry (id | name | url) =====
-# You can add/edit entries here. IDs must be unique.
 declare -A TEMPLATE_VMID
 declare -A TEMPLATE_NAME
 declare -A TEMPLATE_URL
@@ -149,29 +187,26 @@ TEMPLATE_VMID["Fedora42"]=7995
 TEMPLATE_NAME["Fedora42"]="Fedora42Template"
 TEMPLATE_URL["Fedora42"]="https://download.fedoraproject.org/pub/fedora/linux/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-42-1.1.x86_64.qcow2"
 
-# ⭐ New: AlmaLinux 8
+# ⭐ AlmaLinux 8
 TEMPLATE_VMID["AlmaLinux8"]=7994
 TEMPLATE_NAME["AlmaLinux8"]="AlmaLinux8Template"
 TEMPLATE_URL["AlmaLinux8"]="https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-latest.x86_64.qcow2"
 
-# ===== Debug Mode selection =====
-# Non-interactive flags:
-#   --debug or DEBUG_MODE=1 to force debug; --no-debug to force quiet
+# ===== Debug Mode controls =====
+# Env DEBUG_MODE (e.g., DEBUG_MODE=1) or flags --debug / --no-debug
 if [ "${DEBUG_MODE}" != "true" ] && [ -n "${DEBUG_MODE+x}" ]; then
-  # Honor env DEBUG_MODE if set to a non-empty value
   case "$DEBUG_MODE" in
     1|true|TRUE|on|ON|yes|YES) DEBUG_MODE=true ;;
     *) DEBUG_MODE=false ;;
   esac
 fi
 
-FORCE_DEBUG_UNSET=false
+FORCE_DEBUG_CHOSEN=false
 EXTRA_KEYS=()
-
 for arg in "$@"; do
   case "$arg" in
-    --debug) DEBUG_MODE=true; FORCE_DEBUG_UNSET=true ;;
-    --no-debug) DEBUG_MODE=false; FORCE_DEBUG_UNSET=true ;;
+    --debug) DEBUG_MODE=true; FORCE_DEBUG_CHOSEN=true ;;
+    --no-debug) DEBUG_MODE=false; FORCE_DEBUG_CHOSEN=true ;;
     *) EXTRA_KEYS+=("$arg") ;;
   esac
 done
@@ -180,11 +215,11 @@ done
 SELECTED_KEYS=()
 
 if [ "${#EXTRA_KEYS[@]}" -gt 0 ]; then
-  # Non-interactive: allow passing keys like "Ubuntu24.04 Debian12 AlmaLinux8"
+  # Non-interactive: keys passed on CLI
   SELECTED_KEYS=("${EXTRA_KEYS[@]}")
 else
-  # Ask for Debug Mode first (unless explicitly forced via flag)
-  if [ "$FORCE_DEBUG_UNSET" = false ]; then
+  # Ask for Debug Mode first (unless flag forced it)
+  if [ "$FORCE_DEBUG_CHOSEN" = false ]; then
     if whiptail --title "Template Generator" --yesno "Enable debug mode (verbose output)?" 10 70; then
       DEBUG_MODE=true
     else
@@ -192,7 +227,6 @@ else
     fi
   fi
 
-  # Build checklist items: tag, description, status
   MENU_ITEMS=(
     "Ubuntu24.04" "Ubuntu 24.04 LTS" ON
     "Ubuntu24.10" "Ubuntu 24.10" OFF
@@ -203,7 +237,6 @@ else
     "AlmaLinux8"  "AlmaLinux 8 GenericCloud" ON
   )
 
-  # Show current debug state in the checklist subtitle
   CHOICES=$(whiptail --title "Template Generator (Debug: $( [ "$DEBUG_MODE" = true ] && echo ON || echo OFF ))" \
             --checklist "Select templates to generate (SPACE to toggle, ENTER to confirm)" \
             20 78 12 \
@@ -215,7 +248,7 @@ else
     exit 1
   fi
 
-  # whiptail outputs quoted tags; strip quotes and split
+  # whiptail returns quoted entries
   # shellcheck disable=SC2206
   SELECTED_KEYS=(${CHOICES//\"/})
 fi
@@ -227,6 +260,7 @@ fi
 
 echo "🐞 Debug mode: $([ "$DEBUG_MODE" = true ] && echo ON || echo OFF)"
 echo "🏗  Starting generation for: ${SELECTED_KEYS[*]}"
+echo "📦 Target storage: ${PVE_STORAGE}"
 
 # ===== Main loop =====
 for key in "${SELECTED_KEYS[@]}"; do
@@ -238,3 +272,5 @@ for key in "${SELECTED_KEYS[@]}"; do
 done
 
 echo "🎉 All selected templates processed."
+echo "Tip: non-interactive run with debug:"
+echo "  ./TemplateGenerator --debug Ubuntu24.04 Debian12 AlmaLinux8"
