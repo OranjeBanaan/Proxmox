@@ -1,6 +1,11 @@
 #!/bin/bash
 # TemplateGenerator - Script to create multiple Proxmox templates (minimal, classic flow)
 
+# Run:
+#   bash <(curl -fsSL https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt)
+#   or:
+#   bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt?$(date +%s)")
+
 # Install the tool we need for image customization (will prompt/abort if PVE blocks it)
 apt install -y libguestfs-tools
 
