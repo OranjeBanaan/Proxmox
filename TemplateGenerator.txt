@@ -8,8 +8,9 @@ set -o pipefail
 #   or:
 #   bash <(curl -fsSL "https://raw.githubusercontent.com/OranjeBanaan/Proxmox/main/TemplateGenerator.txt?$(date +%s)")
 
-# Install the tool we need for image customization (will prompt/abort if PVE blocks it)
-apt install -y libguestfs-tools
+# Install the tools we need for image customization and DHCP
+apt update -y >/dev/null 2>&1 || true
+apt install -y libguestfs-tools dhcpcd-base
 
 # ===== Config =====
 DEBUG_MODE=false
@@ -42,6 +43,33 @@ delete_existing_vm() {
   fi
 }
 
+# Reuse a downloaded image if it is <= 7 days old; otherwise download again
+# args: <url> <outfile>
+download_with_cache() {
+  local url="$1"
+  local outfile="$2"
+  local max_age_days=7
+
+  if [ -f "$outfile" ]; then
+    # file age in days (integer)
+    local age_days
+    age_days=$(( ( $(date +%s) - $(stat -c %Y "$outfile") ) / 86400 ))
+    if [ "$age_days" -le "$max_age_days" ]; then
+      echo "♻️  Reusing cached image: ${outfile} (<= ${max_age_days} days old)"
+      return 0
+    else
+      echo "↻ Cache too old (${age_days}d) — re-downloading ${outfile}"
+    fi
+  else
+    echo "⬇️  Downloading ${outfile}"
+  fi
+
+  if ! wget -q --show-progress --progress=bar:force:noscroll "$url" -O "$outfile"; then
+    echo "❌ Failed to download image from ${url}"
+    return 1
+  fi
+}
+
 # Decide whether to apply SELinux relabel based on distro name or content
 use_selinux_relabel() {
   local image_file=$1
@@ -71,9 +99,9 @@ create_template() {
 
   echo "Generating ${name}..."
 
-  # Step 1: Download the cloud image
-  if ! wget -q --show-progress --progress=bar:force:noscroll "${image_url}" -O "${image_file}"; then
-    echo "❌ Failed to download image for ${name} from ${image_url}"
+  # Step 1: Download (or reuse) the cloud image
+  if ! download_with_cache "${image_url}" "${image_file}"; then
+    echo "❌ Failed to obtain image for ${name} from ${image_url}"
     return 1
   fi
   show_progress 1
@@ -201,7 +229,6 @@ else
     "AlmaLinux8"  "AlmaLinux 8 GenericCloud" ON
   )
 
-  # Show current debug state in the checklist subtitle
   CHOICES=$(whiptail --title "Template Generator (Debug: $( [ "$DEBUG_MODE" = true ] && echo ON || echo OFF ))" \
             --checklist "Select templates to generate (SPACE to toggle, ENTER to confirm)" \
             20 78 12 \
