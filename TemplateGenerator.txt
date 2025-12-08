@@ -14,7 +14,7 @@ apt install -y libguestfs-tools dhcpcd-base
 
 # ===== Config =====
 DEBUG_MODE=false
-# Proxmox storage to use for imported disks + cloud-init (will auto-fallback to local-zfs if missing)
+# Proxmox storage to use for imported disks + cloud-init
 PVE_STORAGE="local-lvm"
 
 # ===== Helpers =====
@@ -43,25 +43,37 @@ delete_existing_vm() {
   fi
 }
 
-# Resolve storage: prefer PVE_STORAGE, then local-lvm, then local-zfs
-resolve_storage() {
-  local preferred=("$PVE_STORAGE" "local-lvm" "local-zfs")
-  local available ids
-  if ! available=$(pvesm status 2>/dev/null); then
-    echo "❌ Unable to query Proxmox storages via 'pvesm status'." >&2
-    exit 1
+# Ensure target storage exists; fallback to local-zfs if local-lvm missing
+ensure_storage_exists() {
+  local have_lvm=0 have_zfs=0
+  if pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "local-lvm"; then
+    have_lvm=1
   fi
-  ids=$(echo "$available" | awk 'NR>1 {print $1}')
-  for cand in "${preferred[@]}"; do
-    if echo "$ids" | grep -qx "$cand"; then
-      PVE_STORAGE="$cand"
-      echo "📦 Using storage: $PVE_STORAGE"
-      return 0
+  if pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "local-zfs"; then
+    have_zfs=1
+  fi
+
+  if ! pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "$PVE_STORAGE"; then
+    if [ "$PVE_STORAGE" = "local-lvm" ] && [ $have_zfs -eq 1 ]; then
+      echo "ℹ️  Storage 'local-lvm' not found. Falling back to 'local-zfs'."
+      PVE_STORAGE="local-zfs"
+    elif [ "$PVE_STORAGE" = "local-zfs" ] && [ $have_lvm -eq 1 ]; then
+      echo "ℹ️  Storage 'local-zfs' not found. Falling back to 'local-lvm'."
+      PVE_STORAGE="local-lvm"
+    else
+      # Neither requested storage nor the typical fallback exists
+      if [ $have_lvm -eq 1 ]; then
+        echo "ℹ️  Using available storage 'local-lvm'."
+        PVE_STORAGE="local-lvm"
+      elif [ $have_zfs -eq 1 ]; then
+        echo "ℹ️  Using available storage 'local-zfs'."
+        PVE_STORAGE="local-zfs"
+      else
+        echo "❌ No suitable storage found (neither 'local-lvm' nor 'local-zfs'). Aborting."
+        exit 1
+      fi
     fi
-  done
-  echo "❌ No suitable storage found (tried: ${preferred[*]})." >&2
-  echo "   Available storages: $(echo "$ids" | tr '\n' ' ')" >&2
-  exit 1
+  fi
 }
 
 # Reuse a downloaded image if it is <= 7 days old; otherwise download again
@@ -150,7 +162,7 @@ create_template() {
   run_cmd qm disk resize "${vmid}" scsi0 8G
   run_cmd qm set "${vmid}" --ide2 "${PVE_STORAGE}:cloudinit"
   run_cmd qm set "${vmid}" --boot c --bootdisk scsi0
-  run_cmd qm set "${vmid}" --agent enabled=1"
+  run_cmd qm set "${vmid}" --agent enabled=1
   show_progress 5
 
   # Step 6: Convert to template
@@ -222,9 +234,6 @@ done
 # ===== Interactive multi-select menu (whiptail) =====
 SELECTED_KEYS=()
 
-# Resolve storage before doing anything heavy
-resolve_storage
-
 if [ "${#EXTRA_KEYS[@]}" -gt 0 ]; then
   SELECTED_KEYS=("${EXTRA_KEYS[@]}")
 else
@@ -240,10 +249,10 @@ else
     "Ubuntu24.04" "Ubuntu 24.04 LTS" ON
     "Ubuntu22.04" "Ubuntu 22.04 LTS" OFF
     "Debian11"    "Debian 11 (Bullseye)" OFF
-    "Debian12"    "Debian 12 (Bookworm)" ON
-    "Debian13"    "Debian 13 (Trixie)" ON
-    "Fedora42"    "Fedora 42 Cloud" ON
-    "AlmaLinux8"  "AlmaLinux 8 GenericCloud" ON
+    "Debian12"    "Debian 12 (Bookworm)" OFF
+    "Debian13"    "Debian 13 (Trixie)" OFF
+    "Fedora42"    "Fedora 42 Cloud" OFF
+    "AlmaLinux8"  "AlmaLinux 8 GenericCloud" OFF
   )
 
   CHOICES=$(whiptail --title "Template Generator (Debug: $( [ "$DEBUG_MODE" = true ] && echo ON || echo OFF ))" \
@@ -265,6 +274,10 @@ if [ ${#SELECTED_KEYS[@]} -eq 0 ]; then
   echo "No templates selected."
   exit 0
 fi
+
+# Ensure storage exists or fallback before doing any work
+ensure_storage_exists
+echo "🗄  Using storage: ${PVE_STORAGE}"
 
 echo "🐞 Debug mode: $([ "$DEBUG_MODE" = true ] && echo ON || echo OFF)"
 echo "🏗  Starting generation for: ${SELECTED_KEYS[*]}"
