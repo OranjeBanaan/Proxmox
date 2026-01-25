@@ -45,34 +45,25 @@ delete_existing_vm() {
 
 # Ensure target storage exists; fallback to local-zfs if local-lvm missing
 ensure_storage_exists() {
-  local have_lvm=0 have_zfs=0
-  if pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "local-lvm"; then
-    have_lvm=1
-  fi
-  if pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "local-zfs"; then
-    have_zfs=1
+  local storages
+  storages=$(pvesm status 2>/dev/null | awk '{print $1}')
+
+  if echo "$storages" | grep -qx "$PVE_STORAGE"; then
+    return 0
   fi
 
-  if ! pvesm status 2>/dev/null | awk '{print $1}' | grep -qx "$PVE_STORAGE"; then
-    if [ "$PVE_STORAGE" = "local-lvm" ] && [ $have_zfs -eq 1 ]; then
-      echo "ℹ️  Storage 'local-lvm' not found. Falling back to 'local-zfs'."
-      PVE_STORAGE="local-zfs"
-    elif [ "$PVE_STORAGE" = "local-zfs" ] && [ $have_lvm -eq 1 ]; then
-      echo "ℹ️  Storage 'local-zfs' not found. Falling back to 'local-lvm'."
-      PVE_STORAGE="local-lvm"
-    else
-      # Neither requested storage nor the typical fallback exists
-      if [ $have_lvm -eq 1 ]; then
-        echo "ℹ️  Using available storage 'local-lvm'."
-        PVE_STORAGE="local-lvm"
-      elif [ $have_zfs -eq 1 ]; then
-        echo "ℹ️  Using available storage 'local-zfs'."
-        PVE_STORAGE="local-zfs"
-      else
-        echo "❌ No suitable storage found (neither 'local-lvm' nor 'local-zfs'). Aborting."
-        exit 1
-      fi
-    fi
+  if echo "$storages" | grep -qx "local-lvm"; then
+    echo "ℹ️  Storage '$PVE_STORAGE' not found. Falling back to 'local-lvm'."
+    PVE_STORAGE="local-lvm"
+  elif echo "$storages" | grep -qx "local-zfs"; then
+    echo "ℹ️  Storage '$PVE_STORAGE' not found. Falling back to 'local-zfs'."
+    PVE_STORAGE="local-zfs"
+  elif echo "$storages" | grep -qx "local"; then
+    echo "ℹ️  Storage '$PVE_STORAGE' not found. Falling back to 'local'."
+    PVE_STORAGE="local"
+  else
+    echo "❌ No usable Proxmox storage found (local-lvm, local-zfs, local)."
+    exit 1
   fi
 }
 
