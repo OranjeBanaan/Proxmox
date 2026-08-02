@@ -173,7 +173,9 @@ TEMPLATE_VMID["Ubuntu24.04"]=8000
 TEMPLATE_NAME["Ubuntu24.04"]="Ubuntu24.04Template"
 TEMPLATE_URL["Ubuntu24.04"]="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 
-# (Removed Ubuntu24.10)
+TEMPLATE_VMID["Ubuntu26.04"]=8001
+TEMPLATE_NAME["Ubuntu26.04"]="Ubuntu26.04Template"
+TEMPLATE_URL["Ubuntu26.04"]="https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img"
 
 TEMPLATE_VMID["Ubuntu22.04"]=7998
 TEMPLATE_NAME["Ubuntu22.04"]="Ubuntu22.04Template"
@@ -237,6 +239,7 @@ else
   fi
 
   MENU_ITEMS=(
+    "Ubuntu26.04" "Ubuntu 26.04 LTS" ON
     "Ubuntu24.04" "Ubuntu 24.04 LTS" ON
     "Ubuntu22.04" "Ubuntu 22.04 LTS" OFF
     "Debian11"    "Debian 11 (Bullseye)" OFF
