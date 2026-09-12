@@ -177,10 +177,6 @@ TEMPLATE_VMID["Ubuntu26.04"]=8001
 TEMPLATE_NAME["Ubuntu26.04"]="Ubuntu26.04Template"
 TEMPLATE_URL["Ubuntu26.04"]="https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img"
 
-TEMPLATE_VMID["Ubuntu22.04"]=7998
-TEMPLATE_NAME["Ubuntu22.04"]="Ubuntu22.04Template"
-TEMPLATE_URL["Ubuntu22.04"]="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
-
 TEMPLATE_VMID["Debian11"]=7997
 TEMPLATE_NAME["Debian11"]="Debian11Template"
 TEMPLATE_URL["Debian11"]="https://cdimage.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2"
@@ -246,7 +242,6 @@ else
   MENU_ITEMS=(
     "Ubuntu26.04" "Ubuntu 26.04 LTS" ON
     "Ubuntu24.04" "Ubuntu 24.04 LTS" OFF
-    "Ubuntu22.04" "Ubuntu 22.04 LTS" OFF
     "Debian11"    "Debian 11 (Bullseye)" OFF
     "Debian12"    "Debian 12 (Bookworm)" OFF
     "Debian13"    "Debian 13 (Trixie)" OFF
